@@ -17,11 +17,15 @@ LDLIBS += $(LDLIBS_ASOUND) $(LDLIBS_OPUS) $(LDLIBS_ORTP)
 
 .PHONY:		all install dist clean
 
-all:		rx tx
+all:		rx tx btrx-server btrx-client
 
 rx:		rx.o device.o sched.o
 
 tx:		tx.o device.o sched.o
+
+btrx-server:	btrx-server.o device.o sched.o
+
+btrx-client:	btrx-client.o device.o sched.o
 
 install:	rx tx
 		$(INSTALL) -d $(DESTDIR)$(BINDIR)

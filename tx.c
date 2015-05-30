@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include "tx.h"
 #include "defaults.h"
 #include "device.h"
 #include "notice.h"

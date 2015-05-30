@@ -26,6 +26,7 @@
 #include <sys/types.h>
 
 #include "rx.h"
+#include "tx.h"
 #include "defaults.h"
 #include "device.h"
 #include "notice.h"
@@ -33,115 +34,10 @@
 
 static unsigned int verbose = DEFAULT_VERBOSE;
 
-static void timestamp_jump(RtpSession *session, ...)
-{
-	if (verbose > 1)
-		fputc('|', stderr);
-	rtp_session_resync(session);
-}
-
-static RtpSession* create_rtp_recv(const char *addr_desc, const int port,
-		unsigned int jitter)
-{
-	RtpSession *session;
-
-	session = rtp_session_new(RTP_SESSION_RECVONLY);
-	rtp_session_set_scheduling_mode(session, FALSE);
-	rtp_session_set_blocking_mode(session, FALSE);
-	rtp_session_set_local_addr(session, addr_desc, port, -1);
-	rtp_session_set_connected_mode(session, FALSE);
-	rtp_session_enable_adaptive_jitter_compensation(session, TRUE);
-	rtp_session_set_jitter_compensation(session, jitter); /* ms */
-	rtp_session_set_time_jump_limit(session, jitter * 16); /* ms */
-	if (rtp_session_set_payload_type(session, 0) != 0)
-		abort();
-	if (rtp_session_signal_connect(session, "timestamp_jump",
-					timestamp_jump, 0) != 0)
-	{
-		abort();
-	}
-
-	return session;
-}
-
-static int play_one_frame(void *packet,
-		size_t len,
-		OpusDecoder *decoder,
-		snd_pcm_t *snd,
-		const unsigned int channels)
-{
-	int r;
-	float *pcm;
-	snd_pcm_sframes_t f, samples = 1920;
-
-	pcm = alloca(sizeof(float) * samples * channels);
-
-	if (packet == NULL) {
-		r = opus_decode_float(decoder, NULL, 0, pcm, samples, 1);
-	} else {
-		r = opus_decode_float(decoder, packet, len, pcm, samples, 0);
-	}
-	if (r < 0) {
-		fprintf(stderr, "opus_decode: %s\n", opus_strerror(r));
-		return -1;
-	}
-
-	f = snd_pcm_writei(snd, pcm, r);
-	if (f < 0) {
-		f = snd_pcm_recover(snd, f, 0);
-		if (f < 0) {
-			aerror("snd_pcm_writei", f);
-			return -1;
-		}
-		return 0;
-	}
-	if (f < r)
-		fprintf(stderr, "Short write %ld\n", f);
-
-	return r;
-}
-
-static int run_rx(RtpSession *session,
-		OpusDecoder *decoder,
-		snd_pcm_t *snd,
-		const unsigned int channels,
-		const unsigned int rate)
-{
-	int ts = 0;
-
-	for (;;) {
-		int r, have_more;
-		char buf[32768];
-		void *packet;
-
-		r = rtp_session_recv_with_ts(session, (uint8_t*)buf,
-				sizeof(buf), ts, &have_more);
-		assert(r >= 0);
-		assert(have_more == 0);
-		if (r == 0) {
-			packet = NULL;
-			if (verbose > 1)
-				fputc('#', stderr);
-		} else {
-			packet = buf;
-			if (verbose > 1)
-				fputc('.', stderr);
-		}
-
-		r = play_one_frame(packet, r, decoder, snd, channels);
-		if (r == -1)
-			return -1;
-
-		/* Follow the RFC, payload 0 has 8kHz reference rate */
-
-		ts += r * 8000 / rate;
-	}
-}
-
 static void usage(FILE *fd)
 {
-	fprintf(fd, "Usage: rx [<parameters>]\n"
-		"Real-time audio receiver over IP\n");
+	fprintf(fd, "Usage: btrx-client [<parameters>]\n"
+		"Real-time two-way audio over IP (client)\n");
 
 	fprintf(fd, "\nAudio device (ALSA) parameters:\n");
 	fprintf(fd, "  -d <dev>    Device name (default '%s')\n",
@@ -150,23 +46,32 @@ static void usage(FILE *fd)
 		DEFAULT_BUFFER);
 
 	fprintf(fd, "\nNetwork parameters:\n");
-	fprintf(fd, "  -h <addr>   IP address to listen on (default %s)\n",
+	fprintf(fd, "  -h <addr>   IP address to send to (default %s)\n",
 		DEFAULT_ADDR);
 	fprintf(fd, "  -p <port>   UDP port number (default %d)\n",
 		DEFAULT_PORT);
-	fprintf(fd, "  -j <ms>     Jitter buffer (default %d milliseconds)\n",
-		DEFAULT_JITTER);
 
-	fprintf(fd, "\nEncoding parameters (must match sender):\n");
+	fprintf(fd, "\nEncoding parameters:\n");
 	fprintf(fd, "  -r <rate>   Sample rate (default %dHz)\n",
 		DEFAULT_RATE);
 	fprintf(fd, "  -c <n>      Number of channels (default %d)\n",
 		DEFAULT_CHANNELS);
+	fprintf(fd, "  -f <n>      Frame size (default %d samples, see below)\n",
+		DEFAULT_FRAME);
+	fprintf(fd, "  -b <kbps>   Bitrate (approx., default %d)\n",
+		DEFAULT_BITRATE);
 
 	fprintf(fd, "\nProgram parameters:\n");
 	fprintf(fd, "  -v <n>      Verbosity level (default %d)\n",
 		DEFAULT_VERBOSE);
 	fprintf(fd, "  -D <file>   Run as a daemon, writing process ID to the given file\n");
+
+	fprintf(fd, "\nAllowed frame sizes (-f) are defined by the Opus codec. For example,\n"
+		"at 48000Hz the permitted values are 120, 240, 480 or 960.\n");
+}
+
+int receive_thread() {
+	//
 }
 
 int main(int argc, char *argv[])
@@ -191,7 +96,7 @@ int main(int argc, char *argv[])
 	for (;;) {
 		int c;
 
-		c = getopt(argc, argv, "c:d:h:j:m:p:r:v:");
+		c = getopt(argc, argv, "b:c:d:f:h:m:p:r:v:D:");
 		if (c == -1)
 			break;
 		switch (c) {
